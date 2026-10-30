@@ -68,7 +68,7 @@
           hostname: {{ harbor_hostname }}
 
           http:
-            port: 80
+            port: 8081
 
           harbor_admin_password: {{ harbor_admin_password }}
 
@@ -126,7 +126,7 @@
 
     - name: Wait for Harbor HTTP port
       wait_for:
-        port: 80
+        port: 8081
         host: 127.0.0.1
         delay: 10
         timeout: 180
