@@ -72,6 +72,8 @@ ansible-playbook -i inventory/hosts.ini playbooks/03-install-nginx.yml
 
 ### 4) Jenkins
 
+The Jenkins package repo requires its GPG key to be installed before `apt` can update successfully. The playbook includes the required signing key and uses the `signed-by` apt repository option to avoid the `NO_PUBKEY` / `Failed to update apt cache` error.
+
 ```bash
 ansible-playbook -i inventory/hosts.ini playbooks/04-install-jenkins.yml
 ```
