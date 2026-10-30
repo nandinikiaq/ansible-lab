@@ -1,0 +1,49 @@
+---
+- name: Prepare Ubuntu EC2 host for Ansible and SSH
+  hosts: all
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install base packages
+      apt:
+        name:
+          - curl
+          - ca-certificates
+          - gnupg
+          - sudo
+          - unzip
+          - software-properties-common
+        state: present
+
+    - name: Ensure SSH server is installed
+      apt:
+        name: openssh-server
+        state: present
+
+    - name: Ensure SSH service is enabled and running
+      service:
+        name: ssh
+        state: started
+        enabled: true
+
+    - name: Ensure Ubuntu user is in sudo group
+      user:
+        name: "{{ ansible_user }}"
+        groups: sudo
+        append: yes
+        shell: /bin/bash
+
+    - name: Ensure passwordless sudo for ubuntu
+      copy:
+        dest: /etc/sudoers.d/ubuntu
+        content: |
+          ubuntu ALL=(ALL) NOPASSWD:ALL
+        owner: root
+        group: root
+        mode: '0440'

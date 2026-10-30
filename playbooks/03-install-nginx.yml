@@ -1,0 +1,50 @@
+---
+- name: Install and configure Nginx on Ubuntu
+  hosts: all
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Install Nginx
+      apt:
+        name: nginx
+        state: present
+        update_cache: yes
+
+    - name: Configure default site
+      copy:
+        dest: /etc/nginx/sites-available/default
+        content: |
+          server {
+              listen 80 default_server;
+              listen [::]:80 default_server;
+              server_name _;
+              root /var/www/html;
+              index index.html;
+
+              location / {
+                  try_files $uri $uri/ =404;
+              }
+          }
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Create default landing page
+      copy:
+        dest: /var/www/html/index.html
+        content: |
+          <html>
+            <body>
+              <h1>Welcome to Ubuntu EC2</h1>
+            </body>
+          </html>
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Restart and enable Nginx
+      service:
+        name: nginx
+        state: restarted
+        enabled: true

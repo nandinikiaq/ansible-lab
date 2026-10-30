@@ -1,0 +1,70 @@
+---
+- name: Install Harbor Registry on Ubuntu
+  hosts: all
+  become: true
+  gather_facts: true
+  vars:
+    harbor_version: "v2.10.2"
+    harbor_install_dir: "/opt/harbor"
+
+  tasks:
+    - name: Ensure required packages are installed
+      apt:
+        name:
+          - tar
+          - curl
+        state: present
+        update_cache: yes
+
+    - name: Create a temporary installer directory
+      file:
+        path: /tmp/harbor
+        state: directory
+        mode: '0755'
+
+    - name: Download Harbor offline installer
+      get_url:
+        url: "https://github.com/goharbor/harbor/releases/download/{{ harbor_version }}/harbor-offline-installer-{{ harbor_version }}.tgz"
+        dest: "/tmp/harbor/harbor-offline-installer-{{ harbor_version }}.tgz"
+        mode: '0644'
+
+    - name: Extract Harbor package
+      unarchive:
+        src: "/tmp/harbor/harbor-offline-installer-{{ harbor_version }}.tgz"
+        dest: "/opt"
+        remote_src: yes
+        creates: "/opt/harbor/install.sh"
+
+    - name: Create Harbor configuration file
+      copy:
+        dest: "/opt/harbor/harbor.yml"
+        content: |
+          hostname: harbor.example.com
+          http:
+            port: 80
+          https:
+            port: 443
+            certificate: /data/cert/server.crt
+            private_key: /data/cert/server.key
+          harbor_admin_password: Harbor12345
+          data_volume: /data
+          database:
+            password: root123
+          trivy:
+            ignore_unfixed: false
+            skip_update: false
+          jobservice:
+            max_job_workers: 10
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Run Harbor installer
+      command: "/opt/harbor/install.sh"
+      args:
+        chdir: "/opt/harbor"
+      register: harbor_install
+
+    - name: Print Harbor installer result
+      debug:
+        msg: "{{ harbor_install.stdout }}"

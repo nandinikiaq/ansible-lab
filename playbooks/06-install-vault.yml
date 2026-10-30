@@ -1,0 +1,95 @@
+---
+- name: Install HashiCorp Vault on Ubuntu
+  hosts: all
+  become: true
+  gather_facts: true
+  vars:
+    vault_version: "1.17.3"
+
+  tasks:
+    - name: Install unzip package
+      apt:
+        name: unzip
+        state: present
+        update_cache: yes
+
+    - name: Download Vault zip archive
+      get_url:
+        url: "https://releases.hashicorp.com/vault/{{ vault_version }}/vault_{{ vault_version }}_linux_amd64.zip"
+        dest: "/tmp/vault_{{ vault_version }}_linux_amd64.zip"
+        mode: '0644'
+
+    - name: Unpack Vault into /usr/local/bin
+      unarchive:
+        src: "/tmp/vault_{{ vault_version }}_linux_amd64.zip"
+        dest: "/usr/local/bin"
+        remote_src: yes
+        mode: '0755'
+
+    - name: Create Vault user
+      user:
+        name: vault
+        system: yes
+        home: /etc/vault.d
+        shell: /usr/sbin/nologin
+        create_home: no
+
+    - name: Create Vault data and config directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: vault
+        group: vault
+        mode: '0755'
+      loop:
+        - /etc/vault.d
+        - /opt/vault/data
+
+    - name: Create Vault configuration
+      copy:
+        dest: /etc/vault.d/vault.hcl
+        content: |
+          storage "file" {
+            path = "/opt/vault/data"
+          }
+
+          listener "tcp" {
+            address     = "0.0.0.0:8200"
+            tls_disable = 1
+          }
+
+          ui = true
+          api_addr = "http://127.0.0.1:8200"
+        owner: vault
+        group: vault
+        mode: '0640'
+
+    - name: Create systemd unit for Vault
+      copy:
+        dest: /etc/systemd/system/vault.service
+        content: |
+          [Unit]
+          Description="HashiCorp Vault"
+          Wants=network-online.target
+          After=network-online.target
+
+          [Service]
+          User=vault
+          Group=vault
+          ExecStart=/usr/local/bin/vault server -config=/etc/vault.d/vault.hcl
+          ExecReload=/bin/kill -HUP $MAINPID
+          Restart=on-failure
+          LimitNOFILE=65536
+
+          [Install]
+          WantedBy=multi-user.target
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Start and enable Vault
+      systemd:
+        daemon_reload: yes
+        name: vault
+        enabled: true
+        state: started
