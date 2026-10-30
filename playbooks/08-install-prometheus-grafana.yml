@@ -1,111 +1,137 @@
 
 ---
-- name: Install Prometheus and Grafana on Ubuntu
+- name: Install and configure SonarQube on Ubuntu
   hosts: all
   become: true
   gather_facts: true
 
   vars:
-    prometheus_version: "2.54.1"
-    prometheus_port: 9091
-    grafana_port: 3001
+    sonarqube_version: "9.9.6.92038"
+    sonarqube_port: 8400
+    sonar_db_name: sonar
+    sonar_db_user: sonar
+    sonar_db_password: "Sonar123!"
 
   tasks:
-    - name: Check Prometheus port availability
-      wait_for:
-        host: 127.0.0.1
-        port: "{{ prometheus_port }}"
-        state: stopped
-        timeout: 1
 
-    - name: Check Grafana port availability
-      wait_for:
-        host: 127.0.0.1
-        port: "{{ grafana_port }}"
-        state: stopped
-        timeout: 1
-
-    - name: Install Prometheus prerequisites
+    - name: Install SonarQube prerequisites
       apt:
         name:
+          - postgresql
+          - postgresql-contrib
+          - openjdk-17-jdk
           - curl
-          - tar
-          - wget
-          - gnupg
-          - apt-transport-https
+          - unzip
         state: present
         update_cache: yes
 
-    - name: Create Prometheus system user
+    - name: Ensure PostgreSQL is running
+      systemd:
+        name: postgresql
+        state: started
+        enabled: true
+
+    - name: Create SonarQube PostgreSQL user and database
+      shell: |
+        if ! sudo -u postgres psql -tAc \
+          "SELECT 1 FROM pg_roles WHERE rolname='{{ sonar_db_user }}'" | grep -q 1; then
+          sudo -u postgres createuser {{ sonar_db_user }}
+        fi
+
+        if ! sudo -u postgres psql -tAc \
+          "SELECT 1 FROM pg_database WHERE datname='{{ sonar_db_name }}'" | grep -q 1; then
+          sudo -u postgres createdb -O {{ sonar_db_user }} {{ sonar_db_name }}
+        fi
+
+        sudo -u postgres psql -c \
+          "ALTER USER {{ sonar_db_user }} WITH PASSWORD '{{ sonar_db_password }}';"
+      args:
+        executable: /bin/bash
+      register: database_setup
+      changed_when: false
+
+    - name: Configure Linux kernel settings for SonarQube
+      sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        sysctl_file: /etc/sysctl.d/99-sonarqube.conf
+        reload: yes
+      loop:
+        - name: vm.max_map_count
+          value: "524288"
+        - name: fs.file-max
+          value: "131072"
+
+    - name: Create SonarQube system user
       user:
-        name: prometheus
+        name: sonarqube
         system: yes
-        home: /var/lib/prometheus
+        home: /opt/sonarqube
         shell: /usr/sbin/nologin
         create_home: no
 
-    - name: Create Prometheus data and configuration directories
-      file:
-        path: "{{ item }}"
-        state: directory
-        owner: prometheus
-        group: prometheus
-        mode: '0755'
-      loop:
-        - /var/lib/prometheus
-        - /etc/prometheus
-
-    - name: Download Prometheus archive
+    - name: Download SonarQube archive
       get_url:
-        url: "https://github.com/prometheus/prometheus/releases/download/v{{ prometheus_version }}/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz"
-        dest: "/tmp/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz"
+        url: "https://binaries.sonarsource.com/Distribution/sonarqube/sonarqube-{{ sonarqube_version }}.zip"
+        dest: "/tmp/sonarqube-{{ sonarqube_version }}.zip"
         mode: '0644'
+        timeout: 120
 
-    - name: Extract Prometheus archive
+    - name: Extract SonarQube archive
       unarchive:
-        src: "/tmp/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz"
+        src: "/tmp/sonarqube-{{ sonarqube_version }}.zip"
         dest: /opt
         remote_src: yes
-        creates: "/opt/prometheus-{{ prometheus_version }}.linux-amd64"
+        creates: "/opt/sonarqube-{{ sonarqube_version }}"
 
-    - name: Create Prometheus configuration file
+    - name: Set SonarQube directory ownership
+      file:
+        path: "/opt/sonarqube-{{ sonarqube_version }}"
+        owner: sonarqube
+        group: sonarqube
+        recurse: yes
+
+    - name: Create SonarQube installation symlink
+      file:
+        src: "/opt/sonarqube-{{ sonarqube_version }}"
+        dest: /opt/sonarqube
+        state: link
+        force: yes
+
+    - name: Configure SonarQube database and web settings
+      blockinfile:
+        path: /opt/sonarqube/conf/sonar.properties
+        marker: "# {mark} ANSIBLE MANAGED BLOCK"
+        block: |
+          sonar.jdbc.username={{ sonar_db_user }}
+          sonar.jdbc.password={{ sonar_db_password }}
+          sonar.jdbc.url=jdbc:postgresql://localhost/{{ sonar_db_name }}
+          sonar.web.host=0.0.0.0
+          sonar.web.port={{ sonarqube_port }}
+      notify: Restart SonarQube
+
+    - name: Create SonarQube systemd service
       copy:
-        dest: /etc/prometheus/prometheus.yml
-        content: |
-          global:
-            scrape_interval: 15s
-            evaluation_interval: 15s
-
-          scrape_configs:
-            - job_name: 'prometheus'
-              static_configs:
-                - targets: ['localhost:{{ prometheus_port }}']
-
-            - job_name: 'node'
-              static_configs:
-                - targets: ['localhost:9100']
-        owner: prometheus
-        group: prometheus
-        mode: '0644'
-      notify: Restart Prometheus
-
-    - name: Create Prometheus systemd service
-      copy:
-        dest: /etc/systemd/system/prometheus.service
+        dest: /etc/systemd/system/sonarqube.service
         content: |
           [Unit]
-          Description=Prometheus Monitoring
+          Description=SonarQube Service
           Wants=network-online.target
-          After=network-online.target
+          After=network-online.target postgresql.service
+          Requires=postgresql.service
 
           [Service]
-          User=prometheus
-          Group=prometheus
           Type=simple
-          ExecStart=/opt/prometheus-{{ prometheus_version }}.linux-amd64/prometheus --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/var/lib/prometheus --web.listen-address=0.0.0.0:{{ prometheus_port }}
+          User=sonarqube
+          Group=sonarqube
+          ExecStart=/opt/sonarqube/bin/linux-x86-64/sonar.sh console
           Restart=on-failure
-          RestartSec=5
-          LimitNOFILE=65536
+          RestartSec=10
+          LimitNOFILE=131072
+          LimitNPROC=8192
+          StandardOutput=journal
+          StandardError=inherit
 
           [Install]
           WantedBy=multi-user.target
@@ -114,105 +140,51 @@
         mode: '0644'
       notify:
         - Reload systemd
-        - Restart Prometheus
+        - Restart SonarQube
 
-    - name: Add Grafana GPG key
-      shell: |
-        curl -fsSL https://packages.grafana.com/gpg.key | gpg --dearmor --yes -o /usr/share/keyrings/grafana.gpg
-        chmod a+r /usr/share/keyrings/grafana.gpg
-      args:
-        executable: /bin/bash
-
-    - name: Add Grafana APT repository
-      apt_repository:
-        repo: "deb [signed-by=/usr/share/keyrings/grafana.gpg] https://packages.grafana.com/oss/deb stable main"
-        filename: grafana
-        state: present
-
-    - name: Install Grafana
-      apt:
-        name: grafana
-        state: present
-        update_cache: yes
-
-    - name: Configure Grafana port
-      ini_file:
-        path: /etc/grafana/grafana.ini
-        section: server
-        option: http_port
-        value: "{{ grafana_port }}"
-        no_extra_spaces: true
-      notify: Restart Grafana
-
-    - name: Enable and start Prometheus
+    - name: Enable and start SonarQube
       systemd:
-        name: prometheus
+        name: sonarqube
         daemon_reload: yes
         enabled: true
         state: started
 
-    - name: Enable and start Grafana
-      systemd:
-        name: grafana-server
-        enabled: true
-        state: started
-
-    - name: Wait for Prometheus port
+    - name: Wait for SonarQube port 8400
       wait_for:
         host: 127.0.0.1
-        port: "{{ prometheus_port }}"
+        port: "{{ sonarqube_port }}"
         state: started
-        delay: 5
-        timeout: 180
+        delay: 10
+        timeout: 300
 
-    - name: Wait for Grafana port
-      wait_for:
-        host: 127.0.0.1
-        port: "{{ grafana_port }}"
-        state: started
-        delay: 5
-        timeout: 180
-
-    - name: Verify Prometheus API
+    - name: Verify SonarQube HTTP API
       uri:
-        url: "http://127.0.0.1:{{ prometheus_port }}/-/healthy"
+        url: "http://127.0.0.1:{{ sonarqube_port }}/api/system/status"
         method: GET
+        return_content: yes
         status_code: 200
-      register: prometheus_health
+      register: sonar_status
       retries: 10
-      delay: 10
-      until: prometheus_health.status == 200
+      delay: 15
+      until: sonar_status.status == 200
 
-    - name: Verify Grafana API
-      uri:
-        url: "http://127.0.0.1:{{ grafana_port }}/api/health"
-        method: GET
-        status_code: 200
-      register: grafana_health
-      retries: 10
-      delay: 10
-      until: grafana_health.status == 200
-
-    - name: Display monitoring service verification
+    - name: Display SonarQube installation result
       debug:
         msg:
-          - "Prometheus is running on port {{ prometheus_port }}"
-          - "Grafana is running on port {{ grafana_port }}"
-          - "Prometheus URL: http://{{ ansible_host }}:{{ prometheus_port }}"
-          - "Grafana URL: http://{{ ansible_host }}:{{ grafana_port }}"
+          - "SonarQube installation completed."
+          - "Version: {{ sonarqube_version }}"
+          - "Port: {{ sonarqube_port }}"
+          - "URL: http://{{ ansible_host }}:{{ sonarqube_port }}"
+          - "API response: {{ sonar_status.json }}"
 
   handlers:
+
     - name: Reload systemd
       systemd:
         daemon_reload: yes
 
-    - name: Restart Prometheus
+    - name: Restart SonarQube
       systemd:
-        name: prometheus
+        name: sonarqube
         state: restarted
         daemon_reload: yes
-
-    - name: Restart Grafana
-      systemd:
-        name: grafana-server
-        state: restarted
