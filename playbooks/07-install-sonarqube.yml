@@ -1,18 +1,17 @@
 
 ---
-- name: Install and configure SonarQube on Ubuntu
+- name: Install and configure SonarQube using Docker
   hosts: all
   become: true
   gather_facts: true
 
   vars:
-    sonarqube_version: "9.9.6.100019"
+    sonarqube_image: "sonarqube:community"
     sonarqube_port: 8400
-    sonar_db_name: sonar
-    sonar_db_user: sonar
-    sonar_db_password: "Sonar123!"
+    sonarqube_container: "sonarqube"
 
   tasks:
+
     - name: Display currently listening ports
       command: ss -tulpn
       register: listening_ports
@@ -29,131 +28,63 @@
         state: stopped
         timeout: 1
 
-    - name: Install SonarQube prerequisites
+    - name: Install Docker prerequisites
       apt:
         name:
-          - postgresql
-          - postgresql-contrib
-          - openjdk-17-jdk
           - curl
-          - unzip
+          - ca-certificates
         state: present
         update_cache: yes
 
-    - name: Ensure PostgreSQL is running
-      service:
-        name: postgresql
-        state: started
-        enabled: true
+    - name: Check Docker installation
+      command: docker --version
+      register: docker_version
+      changed_when: false
 
-    - name: Create SonarQube PostgreSQL user and database
-      shell: |
-        if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='{{ sonar_db_user }}'" | grep -q 1; then
-          sudo -u postgres createuser {{ sonar_db_user }}
-        fi
+    - name: Display Docker version
+      debug:
+        var: docker_version.stdout
 
-        if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='{{ sonar_db_name }}'" | grep -q 1; then
-          sudo -u postgres createdb -O {{ sonar_db_user }} {{ sonar_db_name }}
-        fi
-
-        sudo -u postgres psql -c "ALTER USER {{ sonar_db_user }} WITH PASSWORD '{{ sonar_db_password }}';"
-      args:
-        executable: /bin/bash
-
-    - name: Configure Linux kernel settings for SonarQube
-      sysctl:
-        name: "{{ item.name }}"
-        value: "{{ item.value }}"
-        state: present
-        sysctl_file: /etc/sysctl.d/99-sonarqube.conf
-        reload: yes
-      loop:
-        - { name: 'vm.max_map_count', value: '524288' }
-        - { name: 'fs.file-max', value: '131072' }
-
-    - name: Create SonarQube system user
-      user:
-        name: sonarqube
-        system: yes
-        home: /opt/sonarqube
-        shell: /usr/sbin/nologin
-        create_home: no
-
-    - name: Download SonarQube archive
-      get_url:
-        url: "https://binaries.sonarsource.com/Distribution/sonarqube/sonarqube-{{ sonarqube_version }}.zip"
-        dest: "/tmp/sonarqube-{{ sonarqube_version }}.zip"
-        mode: '0644'
-
-    - name: Unpack SonarQube archive
-      unarchive:
-        src: "/tmp/sonarqube-{{ sonarqube_version }}.zip"
-        dest: /opt
-        remote_src: yes
-        creates: "/opt/sonarqube-{{ sonarqube_version }}"
-
-    - name: Set ownership on SonarQube directory
-      file:
-        path: "/opt/sonarqube-{{ sonarqube_version }}"
-        owner: sonarqube
-        group: sonarqube
-        recurse: yes
-
-    - name: Create symlink to SonarQube installation
-      file:
-        src: "/opt/sonarqube-{{ sonarqube_version }}"
-        dest: /opt/sonarqube
-        state: link
-        force: yes
-
-    - name: Configure database and web settings
-      blockinfile:
-        path: /opt/sonarqube/conf/sonar.properties
-        marker: "# {mark} ANSIBLE MANAGED BLOCK"
-        block: |
-          sonar.jdbc.username={{ sonar_db_user }}
-          sonar.jdbc.password={{ sonar_db_password }}
-          sonar.jdbc.url=jdbc:postgresql://localhost/{{ sonar_db_name }}
-          sonar.web.host=0.0.0.0
-          sonar.web.port={{ sonarqube_port }}
-      notify: Restart SonarQube
-
-    - name: Create SonarQube systemd service
-      copy:
-        dest: /etc/systemd/system/sonarqube.service
-        content: |
-          [Unit]
-          Description=SonarQube Service
-          After=syslog.target network.target postgresql.service
-          Requires=postgresql.service
-
-          [Service]
-          Type=simple
-          User=sonarqube
-          Group=sonarqube
-          ExecStart=/opt/sonarqube/bin/linux-x86-64/sonar.sh console
-          Restart=on-failure
-          RestartSec=10
-          LimitNOFILE=131072
-          LimitNPROC=8192
-          StandardOutput=journal
-          StandardError=inherit
-
-          [Install]
-          WantedBy=multi-user.target
-        owner: root
-        group: root
-        mode: '0644'
-      notify:
-        - Reload systemd
-        - Restart SonarQube
-
-    - name: Enable and start SonarQube
+    - name: Ensure Docker service is running
       systemd:
-        name: sonarqube
-        daemon_reload: yes
-        enabled: true
+        name: docker
         state: started
+        enabled: true
+
+    - name: Pull official SonarQube Community image
+      community.docker.docker_image:
+        name: "{{ sonarqube_image }}"
+        source: pull
+
+    - name: Create SonarQube data volume
+      community.docker.docker_volume:
+        name: sonarqube_data
+        state: present
+
+    - name: Create SonarQube extensions volume
+      community.docker.docker_volume:
+        name: sonarqube_extensions
+        state: present
+
+    - name: Create SonarQube logs volume
+      community.docker.docker_volume:
+        name: sonarqube_logs
+        state: present
+
+    - name: Start SonarQube container
+      community.docker.docker_container:
+        name: "{{ sonarqube_container }}"
+        image: "{{ sonarqube_image }}"
+        state: started
+        restart_policy: unless-stopped
+        published_ports:
+          - "{{ sonarqube_port }}:9000"
+        volumes:
+          - sonarqube_data:/opt/sonarqube/data
+          - sonarqube_extensions:/opt/sonarqube/extensions
+          - sonarqube_logs:/opt/sonarqube/logs
+        env:
+          SONAR_ES_BOOTSTRAP_CHECKS_DISABLE: "true"
 
     - name: Wait for SonarQube port
       wait_for:
@@ -170,25 +101,17 @@
         return_content: yes
         status_code: 200
       register: sonar_http_status
-      retries: 10
+      retries: 20
       delay: 15
       until: sonar_http_status.status == 200
 
     - name: Display SonarQube verification
       debug:
         msg:
-          - "SonarQube is responding successfully."
+          - "SonarQube is running successfully."
+          - "Image: {{ sonarqube_image }}"
+          - "Container: {{ sonarqube_container }}"
           - "Port: {{ sonarqube_port }}"
           - "URL: http://{{ ansible_host }}:{{ sonarqube_port }}"
           - "API status: {{ sonar_http_status.json }}"
 
-  handlers:
-    - name: Reload systemd
-      systemd:
-        daemon_reload: yes
-
-    - name: Restart SonarQube
-      systemd:
-        name: sonarqube
-        state: restarted
-        daemon_reload: yes
