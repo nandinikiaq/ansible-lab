@@ -1,3 +1,4 @@
+
 ---
 - name: Install Jenkins on Ubuntu
   hosts: all
@@ -5,24 +6,32 @@
   gather_facts: true
 
   tasks:
-    - name: Install Java runtime for Jenkins
+    - name: Install Java 21 and fontconfig
       apt:
-        name: openjdk-17-jdk
+        name:
+          - fontconfig
+          - openjdk-21-jre
         state: present
         update_cache: yes
 
-    - name: Add Jenkins GPG key
-      shell: |
-        curl -fsSL https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key | gpg --dearmor -o /usr/share/keyrings/jenkins.gpg
-        chmod a+r /usr/share/keyrings/jenkins.gpg
-      args:
-        executable: /bin/bash
+    - name: Create Jenkins keyrings directory
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
 
-    - name: Add Jenkins APT repository
+    - name: Download Jenkins 2026 GPG key
+      get_url:
+        url: https://pkg.jenkins.io/debian-stable/jenkins.io-2026.key
+        dest: /etc/apt/keyrings/jenkins-keyring.asc
+        mode: '0644'
+
+    - name: Configure Jenkins stable repository
       apt_repository:
-        repo: "deb [signed-by=/usr/share/keyrings/jenkins.gpg] https://pkg.jenkins.io/debian-stable binary/"
+        repo: "deb [signed-by=/etc/apt/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian-stable binary/"
         filename: jenkins
         state: present
+        update_cache: yes
 
     - name: Install Jenkins
       apt:
@@ -30,13 +39,13 @@
         state: present
         update_cache: yes
 
-    - name: Ensure Jenkins service is enabled and running
+    - name: Enable and start Jenkins
       service:
         name: jenkins
         state: started
         enabled: true
 
-    - name: Wait for Jenkins UI to become available
+    - name: Wait for Jenkins UI
       wait_for:
         host: 127.0.0.1
         port: 8080
