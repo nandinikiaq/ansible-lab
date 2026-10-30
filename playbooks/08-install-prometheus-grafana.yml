@@ -1,18 +1,38 @@
+
 ---
 - name: Install Prometheus and Grafana on Ubuntu
   hosts: all
   become: true
   gather_facts: true
+
   vars:
     prometheus_version: "2.54.1"
+    prometheus_port: 9091
+    grafana_port: 3001
 
   tasks:
+    - name: Check Prometheus port availability
+      wait_for:
+        host: 127.0.0.1
+        port: "{{ prometheus_port }}"
+        state: stopped
+        timeout: 1
+
+    - name: Check Grafana port availability
+      wait_for:
+        host: 127.0.0.1
+        port: "{{ grafana_port }}"
+        state: stopped
+        timeout: 1
+
     - name: Install Prometheus prerequisites
       apt:
         name:
           - curl
           - tar
           - wget
+          - gnupg
+          - apt-transport-https
         state: present
         update_cache: yes
 
@@ -24,6 +44,17 @@
         shell: /usr/sbin/nologin
         create_home: no
 
+    - name: Create Prometheus data and configuration directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: prometheus
+        group: prometheus
+        mode: '0755'
+      loop:
+        - /var/lib/prometheus
+        - /etc/prometheus
+
     - name: Download Prometheus archive
       get_url:
         url: "https://github.com/prometheus/prometheus/releases/download/v{{ prometheus_version }}/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz"
@@ -33,17 +64,9 @@
     - name: Extract Prometheus archive
       unarchive:
         src: "/tmp/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz"
-        dest: "/opt"
+        dest: /opt
         remote_src: yes
         creates: "/opt/prometheus-{{ prometheus_version }}.linux-amd64"
-
-    - name: Create Prometheus config directory
-      file:
-        path: /etc/prometheus
-        state: directory
-        owner: prometheus
-        group: prometheus
-        mode: '0755'
 
     - name: Create Prometheus configuration file
       copy:
@@ -54,19 +77,24 @@
             evaluation_interval: 15s
 
           scrape_configs:
+            - job_name: 'prometheus'
+              static_configs:
+                - targets: ['localhost:{{ prometheus_port }}']
+
             - job_name: 'node'
               static_configs:
                 - targets: ['localhost:9100']
         owner: prometheus
         group: prometheus
         mode: '0644'
+      notify: Restart Prometheus
 
     - name: Create Prometheus systemd service
       copy:
         dest: /etc/systemd/system/prometheus.service
         content: |
           [Unit]
-          Description=Prometheus
+          Description=Prometheus Monitoring
           Wants=network-online.target
           After=network-online.target
 
@@ -74,22 +102,32 @@
           User=prometheus
           Group=prometheus
           Type=simple
-          ExecStart=/opt/prometheus-{{ prometheus_version }}.linux-amd64/prometheus --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/var/lib/prometheus
-          Restart=always
+          ExecStart=/opt/prometheus-{{ prometheus_version }}.linux-amd64/prometheus --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/var/lib/prometheus --web.listen-address=0.0.0.0:{{ prometheus_port }}
+          Restart=on-failure
+          RestartSec=5
+          LimitNOFILE=65536
 
           [Install]
           WantedBy=multi-user.target
         owner: root
         group: root
         mode: '0644'
+      notify:
+        - Reload systemd
+        - Restart Prometheus
 
-    - name: Install Grafana repository
+    - name: Add Grafana GPG key
       shell: |
-        curl -fsSL https://packages.grafana.com/gpg.key | gpg --dearmor -o /usr/share/keyrings/grafana.gpg
+        curl -fsSL https://packages.grafana.com/gpg.key | gpg --dearmor --yes -o /usr/share/keyrings/grafana.gpg
         chmod a+r /usr/share/keyrings/grafana.gpg
-        echo "deb [signed-by=/usr/share/keyrings/grafana.gpg] https://packages.grafana.com/oss/deb stable main" > /etc/apt/sources.list.d/grafana.list
       args:
         executable: /bin/bash
+
+    - name: Add Grafana APT repository
+      apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/grafana.gpg] https://packages.grafana.com/oss/deb stable main"
+        filename: grafana
+        state: present
 
     - name: Install Grafana
       apt:
@@ -97,12 +135,84 @@
         state: present
         update_cache: yes
 
-    - name: Start and enable Prometheus and Grafana
+    - name: Configure Grafana port
+      ini_file:
+        path: /etc/grafana/grafana.ini
+        section: server
+        option: http_port
+        value: "{{ grafana_port }}"
+        no_extra_spaces: true
+      notify: Restart Grafana
+
+    - name: Enable and start Prometheus
       systemd:
+        name: prometheus
         daemon_reload: yes
-        name: "{{ item }}"
         enabled: true
         state: started
-      loop:
-        - prometheus
-        - grafana-server
+
+    - name: Enable and start Grafana
+      systemd:
+        name: grafana-server
+        enabled: true
+        state: started
+
+    - name: Wait for Prometheus port
+      wait_for:
+        host: 127.0.0.1
+        port: "{{ prometheus_port }}"
+        state: started
+        delay: 5
+        timeout: 180
+
+    - name: Wait for Grafana port
+      wait_for:
+        host: 127.0.0.1
+        port: "{{ grafana_port }}"
+        state: started
+        delay: 5
+        timeout: 180
+
+    - name: Verify Prometheus API
+      uri:
+        url: "http://127.0.0.1:{{ prometheus_port }}/-/healthy"
+        method: GET
+        status_code: 200
+      register: prometheus_health
+      retries: 10
+      delay: 10
+      until: prometheus_health.status == 200
+
+    - name: Verify Grafana API
+      uri:
+        url: "http://127.0.0.1:{{ grafana_port }}/api/health"
+        method: GET
+        status_code: 200
+      register: grafana_health
+      retries: 10
+      delay: 10
+      until: grafana_health.status == 200
+
+    - name: Display monitoring service verification
+      debug:
+        msg:
+          - "Prometheus is running on port {{ prometheus_port }}"
+          - "Grafana is running on port {{ grafana_port }}"
+          - "Prometheus URL: http://{{ ansible_host }}:{{ prometheus_port }}"
+          - "Grafana URL: http://{{ ansible_host }}:{{ grafana_port }}"
+
+  handlers:
+    - name: Reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: Restart Prometheus
+      systemd:
+        name: prometheus
+        state: restarted
+        daemon_reload: yes
+
+    - name: Restart Grafana
+      systemd:
+        name: grafana-server
+        state: restarted

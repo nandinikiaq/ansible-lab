@@ -1,15 +1,19 @@
+
 ---
 - name: Install HashiCorp Vault on Ubuntu
   hosts: all
   become: true
   gather_facts: true
+
   vars:
     vault_version: "1.17.3"
 
   tasks:
-    - name: Install unzip package
+    - name: Install required packages
       apt:
-        name: unzip
+        name:
+          - unzip
+          - curl
         state: present
         update_cache: yes
 
@@ -24,6 +28,13 @@
         src: "/tmp/vault_{{ vault_version }}_linux_amd64.zip"
         dest: "/usr/local/bin"
         remote_src: yes
+      notify: Restart Vault
+
+    - name: Set Vault binary permissions
+      file:
+        path: /usr/local/bin/vault
+        owner: root
+        group: root
         mode: '0755'
 
     - name: Create Vault user
@@ -43,6 +54,7 @@
         mode: '0755'
       loop:
         - /etc/vault.d
+        - /opt/vault
         - /opt/vault/data
 
     - name: Create Vault configuration
@@ -58,18 +70,21 @@
             tls_disable = 1
           }
 
+          disable_mlock = true
+
           ui = true
           api_addr = "http://127.0.0.1:8200"
         owner: vault
         group: vault
         mode: '0640'
+      notify: Restart Vault
 
     - name: Create systemd unit for Vault
       copy:
         dest: /etc/systemd/system/vault.service
         content: |
           [Unit]
-          Description="HashiCorp Vault"
+          Description=HashiCorp Vault
           Wants=network-online.target
           After=network-online.target
 
@@ -79,17 +94,58 @@
           ExecStart=/usr/local/bin/vault server -config=/etc/vault.d/vault.hcl
           ExecReload=/bin/kill -HUP $MAINPID
           Restart=on-failure
+          RestartSec=5
           LimitNOFILE=65536
+          NoNewPrivileges=yes
 
           [Install]
           WantedBy=multi-user.target
         owner: root
         group: root
         mode: '0644'
+      notify:
+        - Reload systemd
+        - Restart Vault
 
-    - name: Start and enable Vault
+    - name: Enable and start Vault
       systemd:
-        daemon_reload: yes
         name: vault
         enabled: true
         state: started
+        daemon_reload: yes
+
+    - name: Wait for Vault port 8200
+      wait_for:
+        port: 8200
+        host: 127.0.0.1
+        delay: 3
+        timeout: 60
+
+    - name: Check Vault service status
+      command: systemctl is-active vault
+      register: vault_service_status
+      changed_when: false
+      failed_when: vault_service_status.stdout != "active"
+
+    - name: Check Vault status
+      command: /usr/local/bin/vault status
+      environment:
+        VAULT_ADDR: "http://127.0.0.1:8200"
+      register: vault_status
+      changed_when: false
+      failed_when: vault_status.rc not in [0, 2]
+
+    - name: Display Vault status
+      debug:
+        var: vault_status.stdout_lines
+
+  handlers:
+    - name: Reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: Restart Vault
+      systemd:
+        name: vault
+        state: restarted
+        daemon_reload: yes
